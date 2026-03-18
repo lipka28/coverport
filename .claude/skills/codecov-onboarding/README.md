@@ -1,147 +1,250 @@
-# Codecov Onboarding Skill - Quick Start Guide
+# Code Coverage AI Skills — Quick Start Guide
 
-We've added a new AI skill to help you onboard your repository to Codecov for unit test coverage tracking.
+AI skills that help you onboard your repository to Codecov and generate
+code coverage data. Once installed, your AI coding assistant will
+automatically recognize coverage-related requests and guide you
+through the entire process.
 
-**Skill location:** https://github.com/konflux-ci/coverport/blob/main/.claude/skills/codecov-onboarding/SKILL.md
+**Skills location:** https://github.com/konflux-ci/coverport/blob/main/.claude/skills
 
-## What It Does
+## What the Skills Do
 
-The skill guides you through:
-- Analyzing your repository's test setup (discovering test types like unit, integration, etc.)
-- Verifying tests actually run with coverage locally before touching CI
-- Configuring CI to run tests with coverage and upload to Codecov
-- Automatically handling multiple test types with separate Codecov flags
-- Integrating with your CI system (GitHub Actions, OpenShift CI/Prow, or GitLab CI)
-- Establishing a main branch baseline for accurate PR coverage diffs
+| Skill | What it does |
+|---|---|
+| **codecov-onboarding** | Onboards any repo to Codecov — analyzes your project, configures CI, uploads coverage with proper flags |
+| **codecov-config** | Routes you to the correct Codecov instance based on where your repo is hosted |
+| **c-cpp-coverage** | Generates coverage for C/C++ projects (gcov/lcov pipeline, workarounds for autotools/CMake/Meson) |
+| **coverport-integration** | Integrates e2e test coverage via coverport for containerized Go/Python/Node.js apps (Tekton pipelines or GitHub Actions via podman) |
+
+**You don't need all of them** — install what's relevant:
+- **Everyone** needs `codecov-onboarding` + `codecov-config`
+- **C/C++ projects** also need `c-cpp-coverage`
+- **E2E coverage** (containerized apps with Tekton or GitHub Actions) also needs `coverport-integration`
+
+## What the Skills Handle
+
+- Detecting your programming language and build system
+- Determining which Codecov instance to use (public or self-hosted)
+- Choosing the right auth method (OIDC for GitHub Actions, tokens for GitLab CI/Tekton)
+- Configuring your CI pipeline (GitHub Actions, GitLab CI, OpenShift CI/Prow)
+- Generating coverage reports (language-specific)
+- Uploading with proper flags (`unit-tests`, `integration-tests`, `e2e-tests`)
+- Establishing a main branch baseline for PR coverage diffs
+- Troubleshooting common issues
 
 ## Prerequisites
 
 Before starting, make sure you have:
-- ✅ Tests already in your repository (unit, integration, or both)
-- ✅ A Codecov account (sign up at https://app.codecov.io)
-- ✅ Your Codecov upload token ready
+- Tests already in your repository (unit, integration, or both)
+- Access to a Codecov instance (see the instance table below)
+- For GitLab CI / Tekton: your Codecov upload token ready
 
-## What You're Installing
+### Codecov Instances
 
-This guide helps you install an AI skill - a specialized workflow that teaches the AI how to help you onboard repositories to Codecov. Once installed, it will automatically recognize when you're asking about Codecov and use this skill to guide you.
+| Your repo is on... | Use this Codecov instance |
+|---|---|
+| Public GitHub (github.com) | https://app.codecov.io |
+| Public GitLab (gitlab.com) | https://app.codecov.io |
+| Private GitHub (github.com) | https://codecov-codecov.apps.rosa.konflux-qe.zmr9.p3.openshiftapps.com |
+| Internal GitLab (gitlab.cee.redhat.com) | https://codecov-codecov.apps.rosa.kflux-c-stg-i01.qfla.p3.openshiftapps.com |
 
 ---
 
-## Option A: Claude Code
+## Installation
+
+### Option A: Claude Code
 
 **Requirements:**
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed
-- Minimum version: **2.1.39** (check with `claude --version`)
 
-### Setup (One-Time)
+#### Setup (one-time)
+
+Run this to install all skills:
 
 ```bash
-# Create the skills directory if it doesn't exist
-mkdir -p ~/.claude/skills/codecov-onboarding
+# Core skills (everyone needs these)
+mkdir -p ~/.claude/skills/{codecov-onboarding,codecov-config}
 
-# Download the skill
 curl -o ~/.claude/skills/codecov-onboarding/SKILL.md \
   https://raw.githubusercontent.com/konflux-ci/coverport/main/.claude/skills/codecov-onboarding/SKILL.md
+
+curl -o ~/.claude/skills/codecov-config/CONFIG.md \
+  https://raw.githubusercontent.com/konflux-ci/coverport/main/.claude/skills/codecov-config/CONFIG.md
+
+# C/C++ projects — also install this:
+mkdir -p ~/.claude/skills/c-cpp-coverage
+curl -o ~/.claude/skills/c-cpp-coverage/SKILL.md \
+  https://raw.githubusercontent.com/konflux-ci/coverport/main/.claude/skills/c-cpp-coverage/SKILL.md
+
+# E2E coverage (coverport) — also install this:
+mkdir -p ~/.claude/skills/coverport-integration
+curl -o ~/.claude/skills/coverport-integration/SKILL.md \
+  https://raw.githubusercontent.com/konflux-ci/coverport/main/.claude/skills/coverport-integration/SKILL.md
 ```
 
-### Verify Installation
+#### Verify installation
 
-In Claude Code, type `/skills` to verify the skill is available:
+In Claude Code, type `/skills` to see installed skills:
 
 ```
  User skills (~/.claude/skills)
- codecov-onboarding · ~72 description tokens
+ codecov-onboarding · Onboard repositories to Codecov...
+ c-cpp-coverage     · Generate code coverage for C/C++ projects...
 ```
 
-### Usage
+#### Usage
 
-1. **Navigate to your project repository** where you want to add Codecov
+1. Navigate to your project repository
+2. Start Claude Code and ask:
 
-2. **Start Claude Code** and simply ask:
-   ```
-   I want to onboard my repository to Codecov for unit test coverage using the codecov-onboarding skill.
-   ```
+```
+I want to onboard my repository to Codecov for code coverage
+```
 
-3. **Follow the prompts** - Claude will:
-   - Ask about your Codecov account and CI system
-   - Analyze your repository structure
-   - Guide you through local testing first
-   - Propose CI configuration changes
-   - Help troubleshoot any issues
+3. Follow the prompts — Claude will ask about your repo, analyze it,
+   and make the changes.
 
 ---
 
-## Option B: Cursor
+### Option B: Cursor
 
 **Requirements:** [Cursor](https://cursor.sh) installed
 
-### Setup (One-Time)
+#### Setup (one-time)
 
-Choose one of these options:
+Choose global (all projects) or per-project installation:
 
-**Option B1: Add to your project (recommended for team sharing)**
+**Global installation (recommended):**
+
 ```bash
-# Navigate to your project directory
+# Core skills
+mkdir -p ~/.cursor/skills-cursor/{codecov-onboarding,codecov-config}
+
+curl -o ~/.cursor/skills-cursor/codecov-onboarding/SKILL.md \
+  https://raw.githubusercontent.com/konflux-ci/coverport/main/.claude/skills/codecov-onboarding/SKILL.md
+
+curl -o ~/.cursor/skills-cursor/codecov-config/CONFIG.md \
+  https://raw.githubusercontent.com/konflux-ci/coverport/main/.claude/skills/codecov-config/CONFIG.md
+
+# C/C++ projects — also install this:
+mkdir -p ~/.cursor/skills-cursor/c-cpp-coverage
+curl -o ~/.cursor/skills-cursor/c-cpp-coverage/SKILL.md \
+  https://raw.githubusercontent.com/konflux-ci/coverport/main/.claude/skills/c-cpp-coverage/SKILL.md
+
+# E2E coverage (coverport) — also install this:
+mkdir -p ~/.cursor/skills-cursor/coverport-integration
+curl -o ~/.cursor/skills-cursor/coverport-integration/SKILL.md \
+  https://raw.githubusercontent.com/konflux-ci/coverport/main/.claude/skills/coverport-integration/SKILL.md
+```
+
+**Per-project installation:**
+
+```bash
 cd /path/to/your/project
 
-# Create rules directory and download skill
 mkdir -p .cursor/rules
 curl -o .cursor/rules/codecov-onboarding.md \
   https://raw.githubusercontent.com/konflux-ci/coverport/main/.claude/skills/codecov-onboarding/SKILL.md
+curl -o .cursor/rules/codecov-config.md \
+  https://raw.githubusercontent.com/konflux-ci/coverport/main/.claude/skills/codecov-config/CONFIG.md
+
+# Add c-cpp-coverage.md and/or coverport-integration.md as needed
 ```
 
-**Option B2: Add globally (available in all projects)**
-```bash
-# Check Cursor docs for your OS-specific global rules location
-# Typically: ~/.cursor/rules/ or similar
-mkdir -p ~/.cursor/rules
-curl -o ~/.cursor/rules/codecov-onboarding.md \
-  https://raw.githubusercontent.com/konflux-ci/coverport/main/.claude/skills/codecov-onboarding/SKILL.md
+#### Usage
+
+1. Open your project in Cursor
+2. Ask:
+
+```
+I want to onboard my repository to Codecov for code coverage
 ```
 
-### Usage
-
-1. **Open your project in Cursor**
-
-2. **Ask Cursor:**
-   ```
-   I want to onboard my repository to Codecov for unit test coverage using the codecov-onboarding skill
-   ```
-
-3. **Follow the prompts** - Cursor will guide you through the onboarding process.
+3. Follow the prompts.
 
 ---
 
-## Quick Example
+## Examples
+
+### Example 1: Go project on GitHub with GitHub Actions
 
 ```
-You: I want to add Codecov to my Go project that uses OpenShift CI for testing.
+You: I want to add Codecov to my Go project.
 
-AI: I'll help you onboard your repository to Codecov. Let me start with a few questions:
+AI: I'll help you onboard to Codecov. A few questions first:
+    1. Where is your repo hosted? (GitHub public/private, GitLab...)
+    2. Which CI system runs your tests?
+    ...
 
-1. Have you signed up at https://app.codecov.io?
-2. Do you have your Codecov upload token ready?
-3. Do you already have any partial Codecov setup?
+You: Public GitHub, using GitHub Actions.
 
-[The AI will then analyze your repo and guide you step-by-step]
+AI: Great — I'll use app.codecov.io with OIDC authentication (no token
+    needed). Let me analyze your repo...
+    [Detects Go, finds go.mod, checks workflows]
+    I'll add a codecov upload step with use_oidc: true after your
+    test step. Here's the proposed change...
 ```
 
-## Key Features
+### Example 2: C/C++ project on GitLab
 
-| Feature | Description |
-|---------|-------------|
-| **Test Type Discovery** | Detects unit, integration, and other test types automatically |
-| **Local Verification** | Verifies tests pass with coverage before configuring CI |
-| **Multi-Test-Type Support** | Configures separate Codecov flags per test type |
-| **Multi-CI Support** | GitHub Actions, OpenShift CI (Prow), GitLab CI |
-| **Partial Setup Handling** | Detects and updates existing Codecov config |
-| **Troubleshooting** | Built-in solutions for common issues |
+```
+You: I need to add code coverage to my C project on gitlab.com.
 
-## Related Skills
+AI: I see this is a C project using autotools (configure.ac found).
+    I'll use the c-cpp-coverage skill for this.
+    Your Codecov instance will be app.codecov.io.
 
-- **coverport-integration** - For e2e test coverage collection (requires instrumentation)
-  - Location: https://github.com/konflux-ci/coverport/blob/main/.claude/skills/coverport-integration/SKILL.md
+    I'll need to:
+    1. Add a coverage CI job with gcov/lcov
+    2. Handle the _FORTIFY_SOURCE conflict with -O0
+    3. Skip heavy tests that hang under coverage
+    4. Create a ci/codecov.sh script for lcov report generation
+    ...
+```
+
+### Example 3: Private GitHub repo
+
+```
+You: I want coverage for my private repo on GitHub.
+
+AI: Since this is a private GitHub repo, I'll use the self-hosted
+    Codecov instance at codecov-codecov.apps.rosa.konflux-qe...
+    You'll need a CODECOV_TOKEN secret (OIDC is not available for
+    self-hosted instances).
+    ...
+```
+
+### Example 4: E2E coverage in GitHub Actions
+
+```
+You: I want to collect e2e coverage from my Go app in GitHub Actions.
+
+AI: I'll use the coverport-integration skill. Since your e2e tests
+    run in GitHub Actions (not Tekton), I'll set up the coverport
+    CLI container via podman.
+
+    How does your e2e test work?
+    a) App deployed to a Kubernetes cluster
+    b) App started locally via podman/docker in the same job
+    c) Frontend app tested with Cypress
+
+You: The app runs locally via docker compose.
+
+AI: I'll use the --url pattern. The workflow will:
+    1. Start your instrumented app (port 9095 exposed)
+    2. Run your e2e tests
+    3. Use `podman run coverport-cli collect --url http://localhost:9095`
+    4. Use `podman run coverport-cli process` to upload to Codecov
+    ...
+```
+
+## Updating Skills
+
+To update to the latest version, re-run the `curl` commands from the
+setup section. The skills are plain markdown files — new versions
+overwrite the old ones.
 
 ## Questions?
 
-If you have questions or run into issues, reach out to the Code Coverage Workgroup.
+If you have questions or run into issues, reach out to the Code Coverage
+Workgroup.

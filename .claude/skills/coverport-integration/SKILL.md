@@ -1,35 +1,41 @@
 ---
 name: coverport-integration
-description: Integrate coverport into Go repositories with Tekton pipelines to enable e2e test coverage collection and upload to Codecov. Use this skill when users ask to integrate coverport, add e2e coverage tracking, or set up coverage instrumentation for Go projects.
+description: Integrate coverport into repositories to enable e2e test coverage collection and upload to Codecov. Supports Go, Python, and Node.js applications with Tekton/Konflux pipelines and GitHub Actions (using coverport CLI container via podman). Use this skill when users ask to integrate coverport, add e2e coverage tracking, or set up coverage instrumentation.
 ---
 
 # Coverport Integration Skill
 
-This skill automates the integration of coverport into Go repositories for e2e test coverage collection and upload to Codecov.
+This skill automates the integration of coverport into repositories for e2e test coverage collection and upload to Codecov. It supports both Tekton/Konflux pipelines and GitHub Actions workflows.
 
 ## What is Coverport?
 
 Coverport is a tool that enables e2e test coverage collection by:
-1. Building instrumented container images with Go's `-cover` flag
-2. Collecting coverage data from running containers during e2e tests
-3. Uploading the coverage data to Codecov with appropriate flags
+1. Building instrumented container images (Go with `-cover`, Python with coverage wrapper, Node.js with V8 inspector)
+2. Collecting coverage data from running containers during e2e tests — via HTTP endpoint or from test runner output
+3. Processing and uploading the coverage data to Codecov with appropriate flags
+
+The coverport CLI is available as a container image that includes all dependencies (oras, cosign, git, language-specific tools):
+```
+quay.io/konflux-ci/konflux-devprod/coverport-cli
+```
 
 ## When to Use This Skill
 
 Use this skill when the user:
 - Asks to integrate coverport into their repository
 - Wants to add e2e test coverage tracking
-- Needs to set up coverage instrumentation for Go projects
+- Needs to set up coverage instrumentation for Go, Python, or Node.js projects
 - Mentions integrating coverage collection for Tekton/Konflux pipelines
+- Wants to collect e2e coverage in GitHub Actions using the coverport CLI container
 
 ## Prerequisites
 
 Before using this skill, verify the repository has:
-- Go codebase with a Dockerfile
-- Tekton pipelines for CI/CD (typically in `.tekton/` directory)
-- E2E test pipeline (typically in `integration-tests/pipelines/`)
-- GitHub Actions workflows (optional but common)
-- Codecov account
+- Codebase with a Dockerfile (Go, Python, or Node.js)
+- One of the following CI/CD setups:
+  - Tekton pipelines (typically in `.tekton/` directory) with an E2E test pipeline (typically in `integration-tests/pipelines/`)
+  - GitHub Actions workflows (in `.github/workflows/`)
+- Codecov account (see `codecov-config/CONFIG.md` for instance routing)
 
 ## Instructions
 
@@ -57,6 +63,15 @@ Before starting, run these checks to understand the repository structure:
    ```bash
    grep -r "ENABLE_COVERAGE\|instrumented\|coverport" . --exclude-dir=vendor --exclude-dir=.git
    ```
+
+5. **Check if e2e test suite rebuilds the container image:**
+   ```bash
+   grep -r "docker-build\|docker build\|podman build\|make.*build.*IMG" test/ --include="*.go" 2>/dev/null
+   ```
+   This is common in kubebuilder/operator-sdk projects where the Ginkgo
+   `BeforeSuite` rebuilds and loads the image into Kind. If found, the
+   test code must pass `ENABLE_COVERAGE` through to the build command,
+   otherwise it will overwrite the instrumented image with a production one.
 
 This helps identify potential conflicts or existing coverage infrastructure before making changes.
 
@@ -343,25 +358,254 @@ Find the `build-images` task (or equivalent) and add `ENABLE_COVERAGE=true` to i
 
 ### Step 7: Update GitHub Actions
 
+#### 7a: Unit Test Coverage Flags
+
 Add codecov flags to distinguish unit tests from e2e tests.
 
 In `.github/workflows/pr.yaml` (or similar), update the codecov upload step:
 
+For public repos using app.codecov.io, use OIDC (no token needed):
 ```yaml
 - name: Upload coverage to Codecov
   uses: codecov/codecov-action@v5
   with:
+    use_oidc: true
     flags: unit-tests
 ```
 
-If there's a separate `codecov.yml` workflow, add the same flags there with the token:
+The job must have `permissions: id-token: write` for OIDC to work.
+
+For private repos using a self-hosted Codecov instance, use token auth:
 ```yaml
-- name: Codecov
+- name: Upload coverage to Codecov
   uses: codecov/codecov-action@v5
   with:
+    url: <CODECOV_INSTANCE_URL>
     token: ${{ secrets.CODECOV_TOKEN }}
     flags: unit-tests
 ```
+
+See `codecov-config/CONFIG.md` for the correct Codecov instance URL
+based on repository location.
+
+#### 7b: E2E Coverage Collection in GitHub Actions
+
+If the repository runs e2e tests in GitHub Actions (not just Tekton),
+use the coverport CLI container via podman to collect and upload e2e
+coverage. The container image includes all dependencies (oras, cosign,
+git, Go, etc.), so nothing needs to be installed separately.
+
+**Container image:**
+```
+quay.io/konflux-ci/konflux-devprod/coverport-cli
+```
+
+There are three patterns depending on where the instrumented app runs
+and how coverage is collected:
+
+##### Pattern A: App Running in Kubernetes (HTTP-based collection)
+
+Use when your GitHub Actions workflow deploys the instrumented app to a
+Kubernetes cluster (e.g., Kind) and runs e2e tests against it. You need
+kubeconfig access to the cluster.
+
+**Important: Rootless podman volume mount permissions on GitHub Actions (Linux):**
+- Kubeconfig files typically have `600` permissions. Rootless podman maps
+  container UIDs differently, so the container user cannot read files
+  with `600` permissions. Copy the kubeconfig to a temp file with `644`.
+- Output directories must be world-writable (`chmod 777`) so the container
+  can create subdirectories and write coverage files.
+
+```yaml
+- name: Collect e2e coverage
+  if: always()
+  run: |
+    mkdir -p coverage-output && chmod 777 coverage-output
+    cp $HOME/.kube/config /tmp/kubeconfig && chmod 644 /tmp/kubeconfig
+    podman run --rm \
+      --network host \
+      -v /tmp/kubeconfig:/kubeconfig:ro \
+      -v $PWD/coverage-output:/workspace/coverage-output \
+      -e KUBECONFIG=/kubeconfig \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli \
+      collect \
+        --namespace=${{ env.TEST_NAMESPACE }} \
+        --label-selector=${{ env.LABEL_SELECTOR }} \
+        --test-name=e2e-tests \
+        --output=/workspace/coverage-output || true
+
+- name: Upload e2e coverage to Codecov
+  if: always()
+  uses: codecov/codecov-action@v5
+  with:
+    use_oidc: true  # or token for private repos
+    flags: e2e-tests
+    files: coverage-output/<component>/<test-name>/coverage.out
+    fail_ci_if_error: false
+```
+
+**Alternative: Using coverport process + push for OCI storage:**
+```yaml
+- name: Collect and push e2e coverage
+  if: always()
+  run: |
+    mkdir -p coverage-output && chmod 777 coverage-output
+    cp $HOME/.kube/config /tmp/kubeconfig && chmod 644 /tmp/kubeconfig
+    podman run --rm \
+      --network host \
+      -v /tmp/kubeconfig:/kubeconfig:ro \
+      -v $PWD/coverage-output:/workspace/coverage-output \
+      -e KUBECONFIG=/kubeconfig \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli \
+      collect \
+        --images=${{ env.INSTRUMENTED_IMAGE }} \
+        --namespace=${{ env.TEST_NAMESPACE }} \
+        --test-name="e2e-tests" \
+        --output=/workspace/coverage-output \
+        --push \
+        --repository=${{ env.OCI_COVERAGE_REPO }}
+
+    # Process and upload to Codecov
+    podman run --rm \
+      -e CODECOV_TOKEN=${{ secrets.CODECOV_TOKEN }} \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli \
+      process \
+        --artifact-ref=${{ env.COVERAGE_ARTIFACT_REF }} \
+        --image=${{ env.INSTRUMENTED_IMAGE }} \
+        --codecov-flags=e2e-tests
+```
+
+**Key points for Kubernetes collection:**
+- `--network host` is required so coverport can reach the Kind/k8s API
+- The coverport CLI collects coverage via port-forward to the pod's
+  coverage HTTP endpoint (port 9095 by default)
+- The `collect` command automatically generates a `coverage.out` text
+  profile from the binary Go coverage data
+- You can upload directly using `codecov/codecov-action` with the
+  generated `coverage.out` file (simpler, supports OIDC), or use
+  coverport's `process` command for OCI-based workflows
+
+##### Pattern B: App Running Locally via Podman/Docker (HTTP-based collection)
+
+Use when your GitHub Actions workflow starts the instrumented app
+locally (e.g., via `podman run` or `docker compose`) and runs e2e tests
+against it in the same job. The app exposes coverage via HTTP on port
+9095. Use coverport's `--url` flag instead of Kubernetes discovery.
+
+```yaml
+- name: Start instrumented application
+  run: |
+    podman run -d --name app-under-test \
+      -p 8080:8080 -p 9095:9095 \
+      ${{ env.INSTRUMENTED_IMAGE }}
+
+- name: Run e2e tests
+  run: |
+    # Run your e2e test suite against http://localhost:8080
+    <your-e2e-test-command>
+
+- name: Collect and upload e2e coverage
+  if: always()
+  run: |
+    mkdir -p coverage-output && chmod 777 coverage-output
+
+    # Step 1: Collect coverage from the local HTTP endpoint
+    podman run --rm \
+      --network host \
+      -v $PWD/coverage-output:/workspace/coverage-output \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli \
+      collect \
+        --url http://localhost:9095 \
+        --test-name="e2e-tests" \
+        --output=/workspace/coverage-output
+
+    # Step 2: Process and upload to Codecov
+    podman run --rm \
+      -v $PWD/coverage-output:/workspace/coverage-output:ro \
+      -e CODECOV_TOKEN=${{ secrets.CODECOV_TOKEN }} \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli \
+      process \
+        --coverage-dir=/workspace/coverage-output \
+        --repo-url=${{ github.server_url }}/${{ github.repository }} \
+        --commit-sha=${{ github.sha }} \
+        --codecov-flags=e2e-tests
+
+- name: Stop application
+  if: always()
+  run: podman stop app-under-test || true
+```
+
+**Key points for `--url` collection:**
+- `--network host` is required so coverport can reach localhost:9095
+- When using `--url` (no container image), you must pass `--repo-url`
+  and `--commit-sha` to the `process` command explicitly
+- The coverport CLI uses these to clone the repo and remap coverage
+  paths from container paths to source paths
+
+##### Pattern C: Client-Side / Test Runner-Based Coverage Collection
+
+Use when coverage is collected by the test runner rather than from an
+HTTP endpoint — typically for frontend applications using Cypress or
+similar tools. No HTTP collection step is needed; instead, mount the
+coverage output directory into the coverport container for processing.
+
+```yaml
+- name: Build instrumented image
+  run: |
+    podman build -f Dockerfile.instrumented -t myapp:instrumented .
+
+- name: Run e2e tests with coverage
+  run: |
+    cd e2e-tests
+    npm ci
+    npm run cy:run:coverage
+
+- name: Upload e2e coverage to Codecov
+  if: always()
+  run: |
+    mkdir -p coverport-output
+
+    podman run --rm \
+      -v $PWD/e2e-tests/.nyc_output:/workspace/coverage:ro \
+      -v $PWD/coverport-output:/workspace/output:rw \
+      -e CODECOV_TOKEN="${{ secrets.CODECOV_TOKEN }}" \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli \
+      process \
+        --coverage-dir=/workspace/coverage \
+        --format=nyc \
+        --repo-url="${{ github.server_url }}/${{ github.repository }}" \
+        --commit-sha="${{ github.sha }}" \
+        --workspace=/workspace/output \
+        --codecov-flags=e2e
+```
+
+**Notes for client-side coverage:**
+- Use `--format=nyc` for Istanbul/NYC coverage data (Cypress, Jest)
+- Coverage files are from the test runner output directory, not HTTP
+- No `collect` step is needed — go straight to `process`
+
+##### Self-Hosted Codecov with Coverport
+
+When uploading to a self-hosted Codecov instance (see
+`codecov-config/CONFIG.md`), add `--codecov-url` to the `process`
+command:
+
+```yaml
+    podman run --rm \
+      -e CODECOV_TOKEN=${{ secrets.CODECOV_TOKEN }} \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli \
+      process \
+        --codecov-url=<CODECOV_INSTANCE_URL> \
+        --coverage-dir=/workspace/coverage-output \
+        --repo-url=${{ github.server_url }}/${{ github.repository }} \
+        --commit-sha=${{ github.sha }} \
+        --codecov-flags=e2e-tests
+```
+
+**OIDC is not available for coverport uploads** — coverport uses the
+Codecov CLI internally, which always requires a `CODECOV_TOKEN`. The
+`codecov/codecov-action` with OIDC is only for unit test uploads (see
+Step 7a).
 
 ### Step 8: Document Manual Steps
 
@@ -423,7 +667,7 @@ Before committing the changes, verify all modifications are correct:
 - [ ] `go.sum` has coverport checksums
 - [ ] `coverage_init.go` exists at the root of the module with correct build tags
 
-**File modifications checklist:**
+**File modifications checklist (Tekton path):**
 - [ ] `Dockerfile` has `ENABLE_COVERAGE` build arg (removed `COVERAGE_SERVER_URL`)
 - [ ] `Dockerfile` has conditional build logic with `-tags=coverage` flag
 - [ ] `.tekton/*-push.yaml` has `build-instrumented-image` task after `prefetch-dependencies`
@@ -434,18 +678,30 @@ Before committing the changes, verify all modifications are correct:
 - [ ] `integration-tests/pipelines/*e2e*.yaml` uses test-metadata v0.4
 - [ ] `integration-tests/pipelines/*e2e*.yaml` has `collect-and-upload-coverage` task
 - [ ] `integration-tests/pipelines/*e2e*.yaml` updated image references (if applicable)
+
+**File modifications checklist (GitHub Actions path):**
 - [ ] `.github/workflows/pr.y*ml` has `flags: unit-tests` in codecov action
 - [ ] `.github/workflows/codecov.y*ml` has `flags: unit-tests` in codecov action
+- [ ] E2e workflow has coverport collect/process steps using `podman run`
+- [ ] Correct coverport collection pattern chosen (Kubernetes, local `--url`, or client-side)
+- [ ] `CODECOV_TOKEN` secret is configured in GitHub repository settings
+- [ ] For `--url` pattern: `--network host` is set on the podman commands
+- [ ] For `--url` / client-side patterns: `--repo-url` and `--commit-sha` are passed to `process`
+- [ ] For self-hosted Codecov: `--codecov-url` is passed to `process`
+- [ ] For Kubernetes pattern: kubeconfig copied with `chmod 644` before mounting
+- [ ] For all patterns: output directory created with `chmod 777`
+- [ ] If e2e test suite rebuilds the image (e.g., kubebuilder BeforeSuite): `ENABLE_COVERAGE` is passed through
 
 **Documentation provided to user:**
-- [ ] Instructions for creating `coverport-secrets` Kubernetes secret in their tenant namespace
+- [ ] Instructions for creating `coverport-secrets` Kubernetes secret in their tenant namespace (Tekton path)
 - [ ] Explanation that the namespace should be where their build and integration pipelines run
 - [ ] Required secret keys: `codecov-token` and `oci-storage-dockerconfigjson`
 - [ ] Explanation of what `oci-storage-dockerconfigjson` is used for (pushing coverage artifacts to quay.io)
 - [ ] Instructions for encoding auth credentials
 - [ ] Note about needing push access to the quay.io repository
+- [ ] For GitHub Actions: `CODECOV_TOKEN` must be added as a repository secret
 
-**Summary to provide user:**
+**Summary to provide user (Tekton + GitHub Actions):**
 List all modified files with brief description of changes:
 ```
 Modified files:
@@ -458,6 +714,7 @@ Modified files:
 - integration-tests/pipelines/<name>-e2e-pipeline.yaml: Added coverage collection
 - .github/workflows/pr.yml: Added unit-tests flag
 - .github/workflows/codecov.yml: Added unit-tests flag
+- .github/workflows/e2e.yml: Added coverport collect/process steps for e2e coverage
 ```
 
 ## Validation
@@ -469,12 +726,18 @@ After integration is deployed to CI/CD, provide these verification steps to the 
    - Verify the push pipeline creates an image with `.instrumented` tag
    - Check build logs for "Building with coverage instrumentation..." message
 
-2. **Check e2e coverage collection:**
-   - Run e2e tests
+2. **Check e2e coverage collection (Tekton path):**
+   - Run e2e tests via integration pipeline
    - Verify `collect-and-upload-coverage` task executes successfully
    - Check Codecov dashboard for coverage data with `e2e-tests` flag
 
-3. **Check unit test coverage:**
+3. **Check e2e coverage collection (GitHub Actions path):**
+   - Trigger the e2e workflow
+   - Verify the coverport `collect` and `process` steps succeed in the logs
+   - Check Codecov dashboard for coverage data with `e2e-tests` flag
+   - For `--url` collection: verify the app container was reachable on port 9095
+
+4. **Check unit test coverage:**
    - Create a PR
    - Verify unit tests upload coverage with `unit-tests` flag
    - Check Codecov shows both unit and e2e coverage
@@ -532,6 +795,58 @@ Common issues and solutions:
 - Check that `GOCOVERDIR` environment variable is set in the running container/process
 - Verify the coverage collection task can access the cluster where instrumented app runs
 - Review coverage collection task logs for connection or permission errors
+
+**Coverage server not running (port 9095 connection refused) despite instrumented build:**
+- **Cause**: The e2e test suite rebuilds the container image without `ENABLE_COVERAGE=true`,
+  overwriting the instrumented image with a production build
+- This is common in **kubebuilder/operator-sdk scaffolded projects** where the Ginkgo
+  `BeforeSuite` calls `make docker-build` to build and load the image into Kind
+- **Solution**: Ensure `ENABLE_COVERAGE` is passed through to any image rebuild in the
+  test suite. For example, in the e2e test's `BeforeSuite`:
+  ```go
+  // Pass ENABLE_COVERAGE env var to make docker-build
+  coverageParam := fmt.Sprintf("ENABLE_COVERAGE=%s", os.Getenv("ENABLE_COVERAGE"))
+  cmd := exec.Command("make", "docker-build", imgParam, coverageParam)
+  ```
+  And in the GitHub Actions workflow, set `ENABLE_COVERAGE` as an env var on the test step:
+  ```yaml
+  - name: Run e2e tests
+    env:
+      ENABLE_COVERAGE: "true"
+    run: |
+      go test -tags=e2e ./test/e2e/ -v -timeout 30m
+  ```
+- **How to detect**: Check the CI logs for the `BeforeSuite` output. If you see
+  `running: "make docker-build IMG=..."` without `ENABLE_COVERAGE`, the image is
+  being rebuilt without coverage instrumentation
+- **General rule**: Search the entire e2e test code for any `make docker-build` or
+  `docker build` or `podman build` calls that might rebuild the image during tests
+
+**GitHub Actions: coverport collect fails with connection refused:**
+- Ensure `--network host` is set on the `podman run` command so coverport can reach localhost
+- Verify the instrumented app is running and port 9095 is exposed
+- Check `podman logs app-under-test` for startup errors or coverage server messages
+- Try `curl http://localhost:9095/health` before running coverport to confirm the coverage endpoint is available
+
+**GitHub Actions: coverport process fails with "image is a URL, not a container image":**
+- When using `--url` collection (Pattern B), you must pass `--repo-url` and `--commit-sha` to the `process` command
+- Use `${{ github.server_url }}/${{ github.repository }}` for `--repo-url`
+- Use `${{ github.sha }}` for `--commit-sha`
+
+**GitHub Actions: podman volume mount permission errors:**
+- GitHub Actions runners use Ubuntu with rootless podman by default
+- Rootless podman maps UIDs differently inside the container, so host files
+  with restrictive permissions (e.g., `600`) cannot be read by the container
+- **Kubeconfig**: Copy to a temp file with readable permissions before mounting:
+  ```bash
+  cp $HOME/.kube/config /tmp/kubeconfig && chmod 644 /tmp/kubeconfig
+  # Then mount: -v /tmp/kubeconfig:/kubeconfig:ro
+  ```
+- **Output directories**: Must be world-writable for the container to create files:
+  ```bash
+  mkdir -p coverage-output && chmod 777 coverage-output
+  ```
+- For SELinux issues, try adding `:z` suffix to volume mounts
 
 **Production build includes coverage code:**
 - **Cause**: Missing or incorrect build tags
@@ -646,25 +961,30 @@ This skill automates coverport integration by:
 1. Running pre-integration repository scan to understand structure
 2. Analyzing the repository structure in detail
 3. Asking clarifying questions about binaries, secrets, and storage
-4. **Adding coverport as a Go module dependency** (NEW: enables hermetic builds!)
-5. **Creating coverage_init.go with build tags** (NEW: cleaner approach)
+4. **Adding coverport as a Go module dependency** (enables hermetic builds)
+5. **Creating coverage_init.go with build tags** (clean separation)
 6. Modifying the Dockerfile to support coverage builds with build tags
 7. **Validating Dockerfile changes locally with podman/docker builds**
 8. Adding instrumented image build to Tekton push pipeline with hermetic support
 9. Updating e2e pipeline to use test-metadata v0.4 and instrumented images
-10. Adding coverage collection task to e2e pipeline
+10. Adding coverage collection task to e2e pipeline (Tekton path)
 11. Updating PR pipeline to build with coverage instrumentation and hermetic builds
-12. Updating GitHub Actions to add codecov flags
-13. Providing comprehensive post-integration validation checklist
-14. Providing documentation for manual secret creation
+12. Updating GitHub Actions to add codecov flags for unit tests
+13. **E2E coverage collection in GitHub Actions** using coverport CLI container via podman:
+    - Pattern A: Kubernetes-based collection (instrumented app in cluster)
+    - Pattern B: Local/podman-based collection with `--url` flag (app in same job)
+    - Pattern C: Client-side collection (test runner output, e.g. Cypress)
+14. Providing comprehensive post-integration validation checklist
+15. Providing documentation for manual secret creation
 
 The integration enables automatic e2e test coverage collection and upload to Codecov with proper flag separation from unit tests.
 
-**Key improvements in this version:**
+**Key features:**
 - **Hermetic builds**: Go module approach enables secure, reproducible hermetic builds
 - **No external downloads**: Coverage server is a Go module dependency, not downloaded during build
 - **Build tags**: Clean separation of coverage code using Go build tags
+- **GitHub Actions support**: E2e coverage collection using coverport CLI container via podman
+- **Multiple collection patterns**: Kubernetes, local `--url`, or client-side test runner
 - **Early validation**: Podman/docker builds catch issues before CI/CD changes
 - **Clear checklists**: Pre and post-integration checklists ensure nothing is missed
-- **Better guidance**: Clarifies when e2e image references need updating vs source builds
-- **Enhanced troubleshooting**: Covers common scenarios including Go module issues
+- **Enhanced troubleshooting**: Covers common scenarios including GitHub Actions specifics

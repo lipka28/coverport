@@ -1,11 +1,15 @@
 ---
 name: codecov-onboarding
-description: Onboard repositories to Codecov for unit test coverage tracking. Use this skill when users want to add Codecov integration, configure coverage uploads with flags, or set up CI pipelines to report coverage. Works with GitHub Actions, OpenShift CI (Prow), and GitLab CI.
+description: Onboard repositories to Codecov for unit test coverage tracking. Use this skill when users want to add Codecov integration, configure coverage uploads with flags, or set up CI pipelines to report coverage. Works with GitHub Actions, OpenShift CI (Prow), and GitLab CI. Supports public Codecov (app.codecov.io) and self-hosted Codecov instances.
 ---
 
 # Codecov Onboarding Skill
 
 This skill helps developers onboard their repositories to Codecov for unit test coverage tracking. It guides users through the entire process: analyzing their repository, configuring coverage uploads with proper flags, and setting up CI integration.
+
+Supports multiple Codecov instances — see `codecov-config/CONFIG.md`
+for the instance routing table that maps repository locations to the
+correct Codecov instance.
 
 ## What is Codecov?
 
@@ -24,49 +28,86 @@ Use this skill when the user:
 - Mentions integrating Codecov with GitHub Actions, OpenShift CI, or GitLab CI
 - Wants to add coverage tracking to their existing test pipeline
 
+**For C/C++ projects:** This skill handles the overall onboarding
+workflow. For C/C++ specific coverage generation (gcov, lcov, build
+system configuration, workarounds), delegate to the
+`c-cpp-coverage` skill which has detailed guidance.
+
+**For e2e coverage** of containerized applications (via Tekton pipelines
+or GitHub Actions with coverport CLI), use the `coverport-integration`
+skill instead.
+
 ## Prerequisites
 
 Before using this skill, verify:
 - User has an existing repository with unit tests already running
-- User has access to Codecov (https://app.codecov.io)
+- User has access to a Codecov instance (see instance routing below)
 - User knows which CI system runs their unit tests
 
 ## Instructions
 
 ### Step 0: Pre-Onboarding Assessment
 
-Before starting, ask the user these questions and wait for responses:
+Before starting, determine the correct Codecov instance and ask the
+user these questions. Read `codecov-config/CONFIG.md` for the full
+instance routing table.
+
+**Instance routing summary:**
+- Public GitHub repos → https://app.codecov.io (OIDC auth)
+- Public GitLab.com repos → https://app.codecov.io (token auth)
+- Private GitHub repos → https://codecov-codecov.apps.rosa.konflux-qe.zmr9.p3.openshiftapps.com (token auth)
+- Internal GitLab (gitlab.cee.redhat.com) → https://codecov-codecov.apps.rosa.kflux-c-stg-i01.qfla.p3.openshiftapps.com (token auth)
+
+Ask the user these questions and wait for responses:
 
 ```
 I'll help you onboard your repository to Codecov. Let me start with a few questions:
 
-1. **Codecov Account**: Have you signed up at https://app.codecov.io using your GitHub/GitLab account?
+1. **Repository location**: Where is your repository hosted?
+   - GitHub (github.com) — public or private?
+   - GitLab.com (public)
+   - Internal GitLab (gitlab.cee.redhat.com)
+   → This determines which Codecov instance to use.
+
+2. **Codecov Account**: Have you signed up at [CODECOV_INSTANCE_URL]?
    - If NO: Please sign up first, then come back.
 
-2. **Upstream vs Fork**: Are you onboarding the upstream (main) repository or a personal fork?
+3. **Upstream vs Fork**: Are you onboarding the upstream (main) repository or a personal fork?
    - ⚠️ **Important:** You should onboard the **upstream repository**, not your fork.
    - Coverage should be tracked on the main project where PRs are merged.
    - Forks inherit coverage data from the upstream repo automatically.
    - If you only have a fork, coordinate with the upstream maintainers to onboard the main repo.
 
-3. **Repository Added**: Is the upstream repository already added to Codecov?
+4. **Repository Added**: Is the upstream repository already added to Codecov?
    - If NO: Go to Codecov → Your Org → Click "Configure" on the repo to add it.
 
-4. **CI System**: Which CI system runs your unit tests?
+5. **CI System**: Which CI system runs your unit tests?
    - GitHub Actions
    - OpenShift CI (Prow)
    - GitLab CI
    - Other (please specify)
 
-5. **Upload Token** (only needed for OpenShift CI, GitLab CI, or local uploads — GitHub Actions uses OIDC instead):
-   - Repository token: Found in Codecov UI → Your Repo → Configure → "Step 3: add token"
-   - Global token: Organization Settings → Global Upload Token (requires org admin)
+6. **Authentication** — choose based on your CI system and Codecov instance:
+   - **GitHub Actions + public Codecov (app.codecov.io) → Use OIDC (preferred, no token needed).**
+     The workflow just needs `permissions: id-token: write` and `use_oidc: true`.
+     Do NOT combine `use_oidc` with `token` — they are mutually exclusive.
+   - **GitHub Actions + self-hosted Codecov → Use a token** (OIDC is only available with app.codecov.io).
+     Also requires `url:` parameter in the codecov-action.
+   - **OpenShift CI / GitLab CI / local uploads → Use a token:**
+     - Repository token: Found in Codecov UI → Your Repo → Configure → "Step 3: add token"
+     - Global token: Organization Settings → Global Upload Token (requires org admin)
 
-6. **Existing Coverage**: Do you already have any Codecov setup (even partial)?
+7. **Existing Coverage**: Do you already have any Codecov setup (even partial)?
    - If YES: What's currently configured? (helps me understand what needs updating)
 ```
 
 Wait for user responses before proceeding.
+
+Once you know the repository location, set these variables for the rest
+of the onboarding:
+- `CODECOV_INSTANCE_URL` — the Codecov instance URL from the routing table
+- `USE_OIDC` — `true` only for public GitHub repos with app.codecov.io
+- `NEEDS_CODECOV_URL_FLAG` — `true` for self-hosted instances (CLI needs `--codecov-url`)
 
 ### Step 1: Analyze the Repository
 
@@ -76,7 +117,14 @@ Scan the repository to understand the current setup:
    ```bash
    # Check for language indicators
    ls -la go.mod package.json requirements.txt Cargo.toml setup.py pyproject.toml 2>/dev/null
+   # Check for C/C++ projects (autotools, CMake, Meson)
+   ls -la configure.ac CMakeLists.txt meson.build Makefile.am 2>/dev/null
    ```
+
+   **If C/C++ is detected** (configure.ac, CMakeLists.txt, or meson.build
+   present), inform the user and read the `c-cpp-coverage` skill for
+   detailed coverage generation guidance. That skill covers compiler
+   flags, lcov pipeline, build system integration, and workarounds.
 
 2. **Find test configuration:**
    ```bash
@@ -192,14 +240,23 @@ Here's how:
    curl -Os https://cli.codecov.io/latest/linux/codecov && chmod +x codecov
 
    # Upload with unit-tests flag
+   # For app.codecov.io:
    codecovcli upload-process \
      --token YOUR_CODECOV_TOKEN \
      --flag unit-tests \
      --file [coverage-file-path] \
      --branch main
 
+   # For self-hosted Codecov, add --codecov-url:
+   codecovcli upload-process \
+     --codecov-url [CODECOV_INSTANCE_URL] \
+     --token YOUR_CODECOV_TOKEN \
+     --flag unit-tests \
+     --file [coverage-file-path] \
+     --branch main
+
 4. **Verify in Codecov UI:**
-   - Go to https://app.codecov.io
+   - Go to [CODECOV_INSTANCE_URL] (the instance from the routing table)
    - Check that coverage appears for your repo
    - Click on "Flags" tab in your repository
    - Click "Enable flag analytics" button to enable flag tracking
@@ -239,15 +296,17 @@ Based on the CI system the user specified:
 
 #### Option A: GitHub Actions
 
-Analyze existing workflow files and propose changes. Use OIDC authentication (no secret token needed):
+Analyze existing workflow files and propose changes.
 
 ```
 I found your test workflow at: .github/workflows/[filename].yml
 
-I'll propose adding Codecov upload after your test step using OIDC authentication.
+I'll propose adding Codecov upload after your test step.
 
 **Changes to .github/workflows/[filename].yml:**
 ```
+
+**For public repos using app.codecov.io (OIDC auth):**
 
 The job must have `id-token: write` permission for OIDC to work:
 
@@ -272,6 +331,25 @@ jobs:
           fail_ci_if_error: false
 ```
 
+**For private repos using self-hosted Codecov (token auth):**
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # ... checkout, setup, test steps ...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          url: [CODECOV_INSTANCE_URL]  # Self-hosted instance URL
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: unit-tests
+          files: [coverage-file-path]
+          fail_ci_if_error: false
+```
+
 ```
 **Important configuration:**
 - Ensure this runs on BOTH pull requests AND push to main/master
@@ -282,10 +360,13 @@ jobs:
     pull_request:
       branches: [main, master]
 
-**OIDC setup (no secrets required):**
+**OIDC setup (public repos with app.codecov.io only — no secrets required):**
+- OIDC is the preferred method for GitHub Actions — use it for public repos
 - OIDC is enabled by default for repos added to Codecov after mid-2024
 - Verify in Codecov UI → Your Repo → Settings → General → "GitHub OIDC" is enabled
 - The `id-token: write` permission in the workflow is required for GitHub to issue the OIDC token
+- **Do NOT use `token` and `use_oidc` together** — they are mutually exclusive
+- **OIDC is NOT available for self-hosted Codecov instances** — use token auth with `url:` instead
 
 **Note:** OIDC is not available for pull requests from forks (GitHub does not grant `id-token: write` to fork PRs for security reasons). Fork PR coverage uploads will be skipped, which is acceptable since the baseline comes from main branch pushes.
 
@@ -389,7 +470,13 @@ I can show you the exact YAML to add, but you'll need to submit a PR there.
 
 #### Option C: GitLab CI
 
-Analyze `.gitlab-ci.yml` and propose changes:
+Analyze `.gitlab-ci.yml` and propose changes.
+
+**For C/C++ projects:** Read the `c-cpp-coverage` skill first — it has
+a complete GitLab CI job template with all necessary workarounds
+(compiler flags, lcov pipeline, test timeout, etc.).
+
+For other languages, propose a simpler job:
 
 ```
 I found your GitLab CI configuration at: .gitlab-ci.yml
@@ -406,8 +493,12 @@ coverage-upload:
     # Your existing test command with coverage
     - [test-command-with-coverage]
     # Upload to Codecov
-    - pip install codecov-cli
-    - codecovcli upload-process --token $CODECOV_TOKEN --flag unit-tests --file [coverage-file-path]
+    - curl -Os https://cli.codecov.io/latest/linux/codecov
+    - chmod +x codecov
+    # For app.codecov.io:
+    - ./codecov upload-process --token $CODECOV_TOKEN --flag unit-tests --file [coverage-file-path]
+    # For self-hosted Codecov, add --codecov-url:
+    # - ./codecov upload-process --codecov-url $CODECOV_URL --token $CODECOV_TOKEN --flag unit-tests --file [coverage-file-path]
   rules:
     # Run on main branch (for baseline)
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
@@ -421,6 +512,7 @@ coverage-upload:
    - Go to GitLab → Repo → Settings → CI/CD → Variables
    - Add variable: CODECOV_TOKEN
    - Mark as "Masked" and "Protected"
+2. For self-hosted Codecov, also add CODECOV_URL variable with the instance URL.
 
 Should I apply this change to your .gitlab-ci.yml? (yes/no)
 ```
@@ -439,7 +531,7 @@ I've made the proposed changes locally. Here's your verification checklist:
 **After pushing changes:**
 □ Commit and push to a branch, open a PR
 □ Check CI logs for "Codecov upload successful" or similar message
-□ Verify in Codecov UI (https://app.codecov.io):
+□ Verify in Codecov UI ([CODECOV_INSTANCE_URL]):
   - Coverage data appears for your commit
   - "unit-tests" flag is visible in the Flags tab
   - Coverage diff is shown on PR (if main branch baseline exists)
@@ -543,15 +635,25 @@ cargo tarpaulin --out Xml
 
 ### C/C++
 
+C/C++ coverage is significantly more complex than other languages.
+**Read the `c-cpp-coverage` skill** for comprehensive guidance including:
+- Build system integration (autotools, CMake, Meson)
+- Compiler flag workarounds (`_FORTIFY_SOURCE`, `-Werror`)
+- The full lcov pipeline with error handling
+- Test suite management under coverage overhead
+- Reusable CI job templates and scripts
+
+Quick reference (see the skill for full details):
 ```bash
 # Compile with coverage
-gcc --coverage -o myprogram myprogram.c
+CFLAGS="-g -O0 --coverage" LDFLAGS="--coverage" ./configure && make
 # Run tests
-./myprogram
-# Generate coverage
-gcov myprogram.c
-# Or use lcov for better output
-lcov --capture --directory . --output-file coverage.info
+make check
+# Generate lcov report
+lcov --capture --directory . --output-file coverage.info \
+  --ignore-errors format,gcov,unsupported,negative
+lcov --remove coverage.info '/usr/*' '*/tests/*' \
+  --output-file coverage.info --ignore-errors format,negative
 ```
 
 ## Troubleshooting
@@ -675,6 +777,16 @@ After integration, provide these verification steps:
    - Verify coverage diff appears in PR comments
    - Check flags are properly displayed
 
+## Related Skills
+
+- **`codecov-config/CONFIG.md`** — Codecov instance routing table (which
+  repo location maps to which Codecov instance). Read this first.
+- **`c-cpp-coverage`** — Detailed C/C++ coverage generation with gcov/lcov.
+  Use when a C/C++ project is detected.
+- **`coverport-integration`** — E2E test coverage for containerized apps
+  using coverport. Use for Go/Python/Node.js apps with Tekton pipelines
+  or GitHub Actions (coverport CLI container via podman).
+
 ## Reference Documentation
 
 - Codecov Quick Start: https://docs.codecov.com/docs/quick-start
@@ -710,3 +822,8 @@ This skill helps onboard repositories to Codecov by:
 8. Troubleshooting common issues
 
 The result is automated coverage uploads with proper flag categorization, enabling teams to track unit test coverage trends and get coverage feedback on PRs.
+
+For C/C++ projects, this skill delegates to the `c-cpp-coverage` skill
+for the coverage generation details. For e2e coverage of containerized
+apps (Tekton or GitHub Actions), see the `coverport-integration` skill.
+For Codecov instance routing, see `codecov-config/CONFIG.md`.

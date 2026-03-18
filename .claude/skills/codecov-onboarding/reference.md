@@ -1,6 +1,16 @@
 # Codecov Onboarding - Reference
 
-Detailed reference material for the codecov-onboarding skill. Read this file when you need language-specific coverage commands, full CI configuration examples, or troubleshooting guidance.
+Detailed reference material for the codecov-onboarding skill. Read this
+file when you need language-specific coverage commands, full CI
+configuration examples, or troubleshooting guidance.
+
+For Codecov instance routing (which instance to use for which repo),
+see `codecov-config/CONFIG.md`.
+
+For C/C++ coverage generation details, see the `c-cpp-coverage` skill.
+
+For e2e coverage of containerized apps (Tekton or GitHub Actions via
+coverport CLI container), see the `coverport-integration` skill.
 
 ## Coverage Generation by Language
 
@@ -52,13 +62,35 @@ cargo tarpaulin --out Xml
 
 ### C/C++
 
+C/C++ coverage requires a multi-step gcov/lcov pipeline with several
+workarounds. **See the `c-cpp-coverage` skill for comprehensive
+guidance.** Quick reference:
+
 ```bash
-gcc --coverage -o myprogram myprogram.c
-./myprogram
-gcov myprogram.c
-# Or use lcov for better output
-lcov --capture --directory . --output-file coverage.info
+# Compile with coverage (add _FORTIFY_SOURCE workaround on Fedora/RHEL)
+CFLAGS="-g -O0 --coverage -Wp,-U_FORTIFY_SOURCE,-D_FORTIFY_SOURCE=0" \
+CXXFLAGS="-g -O0 --coverage -Wp,-U_FORTIFY_SOURCE,-D_FORTIFY_SOURCE=0" \
+LDFLAGS="--coverage" \
+./configure --disable-gcc-warnings
+make
+
+# Run tests (with timeout to prevent hangs)
+timeout -s KILL 30m make check || true
+
+# Generate lcov report (--ignore-errors handles parallel test race conditions)
+lcov --capture --directory . --output-file coverage.info \
+  --ignore-errors format,gcov,unsupported,negative
+lcov --remove coverage.info '/usr/*' '*/tests/*' \
+  --output-file coverage.info --ignore-errors format,negative
 ```
+
+Common issues specific to C/C++ (all documented in `c-cpp-coverage` skill):
+- `_FORTIFY_SOURCE` conflict with `-O0` on Fedora/RHEL
+- Negative gcov counts from parallel test execution
+- `-Werror` failures at `-O0`
+- `lcov` not pre-installed in CI containers
+- Test hangs under coverage instrumentation
+- Plugin .so files missing libgcov symbols
 
 ## OpenShift CI (Prow) - Full Configuration
 
@@ -134,14 +166,24 @@ coverage-upload:
   stage: test
   script:
     - [test-command-with-coverage]
-    - pip install codecov-cli
-    - codecovcli upload-process --token $CODECOV_TOKEN --flag unit-tests --file [coverage-file-path]
+    # Download Codecov CLI
+    - curl -Os https://cli.codecov.io/latest/linux/codecov
+    - chmod +x codecov
+    # For app.codecov.io:
+    - ./codecov upload-process --token $CODECOV_TOKEN --flag unit-tests --file [coverage-file-path]
+    # For self-hosted Codecov, add --codecov-url:
+    # - ./codecov upload-process --codecov-url $CODECOV_URL --token $CODECOV_TOKEN --flag unit-tests --file [coverage-file-path]
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 ```
 
-Setup: Add `CODECOV_TOKEN` as a CI/CD variable in GitLab → Settings → CI/CD → Variables (masked and protected).
+Setup:
+- Add `CODECOV_TOKEN` as a CI/CD variable in GitLab → Settings → CI/CD → Variables (masked and protected).
+- For self-hosted Codecov, also add `CODECOV_URL` with the instance URL.
+
+For C/C++ projects on GitLab, see the `c-cpp-coverage` skill for a
+complete job template with lcov, compiler flags, and test management.
 
 ## Troubleshooting
 
