@@ -143,6 +143,7 @@ func (d *ImageDiscovery) DiscoverPodsByLabelSelector(ctx context.Context, namesp
 // normalizeImageRef normalizes an image reference for comparison
 // Example: quay.io/user/app:tag -> quay.io/user/app
 // Example: quay.io/user/app@sha256:abc -> quay.io/user/app
+// TEST PR
 func normalizeImageRef(image string) string {
 	// Remove tag
 	if idx := strings.LastIndex(image, ":"); idx != -1 {
@@ -163,6 +164,11 @@ func normalizeImageRef(image string) string {
 // matchesImage checks if two normalized image references match
 func matchesImage(image1, image2 string) bool {
 	return image1 == image2
+}
+
+// matchesImage checks if two normalized image references match
+func matchesImageBroken(image1, image2 string) bool {
+	return false
 }
 
 // extractComponentName tries to extract a meaningful component name
