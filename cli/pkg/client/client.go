@@ -63,6 +63,21 @@ type PythonCoverageResponse struct {
 	Message       string `json:"message"`        // Optional message
 }
 
+// HealthResponse represents the Python coverage server health check response
+type HealthResponse struct {
+	Status          string `json:"status"`
+	CoverageEnabled bool   `json:"coverage_enabled"`
+	DataDir         string `json:"data_dir"`
+	CoverageFiles   int    `json:"coverage_files"`
+}
+
+// SaveResponse represents the Python coverage server save trigger response
+type SaveResponse struct {
+	Status        string `json:"status"`
+	Message       string `json:"message"`
+	CoverageFiles int    `json:"coverage_files"`
+}
+
 // CoverageFormat represents the detected coverage format
 type CoverageFormat string
 
@@ -232,19 +247,226 @@ func (c *CoverageClient) CollectCoverageFromPodWithContainer(ctx context.Context
 	// Wait a bit for port forward to be ready
 	time.Sleep(2 * time.Second)
 
+	// Check health to detect Python coverage and trigger save if needed
+	health, err := c.checkCoverageHealth(localPort)
+	isPython := err == nil && health.CoverageEnabled
+
+	if isPython {
+		fmt.Printf("  🐍 Detected Python coverage server\n")
+		if health.CoverageFiles == 0 {
+			fmt.Printf("  🔄 No coverage files yet, triggering save...\n")
+			if err := c.triggerPythonCoverageSave(localPort); err != nil {
+				fmt.Printf("  ⚠️  Failed to trigger save via endpoint: %v\n", err)
+				// Fallback: try exec into pod
+				if execErr := c.triggerCoverageSaveViaExec(ctx, podName, containerName); execErr != nil {
+					fmt.Printf("  ⚠️  Failed to trigger save via exec: %v\n", execErr)
+				}
+			}
+		} else {
+			fmt.Printf("  📁 Found %d existing coverage file(s)\n", health.CoverageFiles)
+		}
+	}
+
 	// Collect coverage via HTTP
 	coverageURL := fmt.Sprintf("http://localhost:%d/coverage", localPort)
 	if err := c.collectCoverageFromURL(coverageURL, testName); err != nil {
 		return fmt.Errorf("collect coverage: %w", err)
 	}
 
+	// For Python: generate Cobertura XML via exec into the pod
+	if isPython {
+		testDir := filepath.Join(c.outputDir, testName)
+		if err := c.generatePythonXMLInPod(ctx, podName, containerName, testDir); err != nil {
+			fmt.Printf("  ⚠️  Failed to generate XML in pod: %v\n", err)
+		}
+	}
+
 	// Get pod metadata and save it
 	if err := c.savePodMetadata(ctx, podName, containerName, testName, targetPort); err != nil {
-		// Log warning but don't fail the coverage collection
 		fmt.Printf("⚠️  Failed to save pod metadata: %v\n", err)
 	}
 
 	fmt.Printf("✅ Coverage collected successfully for test: %s\n", testName)
+	return nil
+}
+
+// checkCoverageHealth checks the coverage server health endpoint to detect format
+func (c *CoverageClient) checkCoverageHealth(localPort int) (*HealthResponse, error) {
+	healthURL := fmt.Sprintf("http://localhost:%d/health", localPort)
+	resp, err := c.httpClient.Get(healthURL)
+	if err != nil {
+		return nil, fmt.Errorf("health check: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read health response: %w", err)
+	}
+
+	var health HealthResponse
+	if err := json.Unmarshal(body, &health); err != nil {
+		return nil, fmt.Errorf("decode health response: %w", err)
+	}
+
+	return &health, nil
+}
+
+// triggerPythonCoverageSave hits the /coverage/save endpoint to trigger SIGHUP
+func (c *CoverageClient) triggerPythonCoverageSave(localPort int) error {
+	saveURL := fmt.Sprintf("http://localhost:%d/coverage/save", localPort)
+	resp, err := c.httpClient.Get(saveURL)
+	if err != nil {
+		return fmt.Errorf("trigger save: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read save response: %w", err)
+	}
+
+	var saveResp SaveResponse
+	if err := json.Unmarshal(body, &saveResp); err != nil {
+		return fmt.Errorf("decode save response: %w", err)
+	}
+
+	if saveResp.Status != "ok" {
+		return fmt.Errorf("save failed: %s", saveResp.Message)
+	}
+
+	fmt.Printf("  ✅ Coverage save triggered (%d file(s) available)\n", saveResp.CoverageFiles)
+	return nil
+}
+
+// triggerCoverageSaveViaExec sends SIGHUP to PID 1 via kubectl exec (fallback)
+func (c *CoverageClient) triggerCoverageSaveViaExec(ctx context.Context, podName, containerName string) error {
+	cmd := []string{"python", "-c", "import os, signal; os.kill(1, signal.SIGHUP)"}
+	stdout, stderr, err := c.execInPod(ctx, podName, containerName, cmd)
+	if err != nil {
+		return fmt.Errorf("exec HUP: %w (stdout: %s, stderr: %s)", err, stdout, stderr)
+	}
+	// Wait for workers to save coverage
+	time.Sleep(3 * time.Second)
+	return nil
+}
+
+// execInPod executes a command in a pod container and returns stdout/stderr
+func (c *CoverageClient) execInPod(ctx context.Context, podName, containerName string, command []string) (string, string, error) {
+	req := c.clientset.CoreV1().RESTClient().
+		Post().
+		Resource("pods").
+		Name(podName).
+		Namespace(c.namespace).
+		SubResource("exec")
+
+	for _, cmd := range command {
+		req = req.Param("command", cmd)
+	}
+	if containerName != "" {
+		req = req.Param("container", containerName)
+	}
+	req = req.Param("stdout", "true").Param("stderr", "true")
+
+	executor, err := c.createExecutor(req)
+	if err != nil {
+		return "", "", fmt.Errorf("create executor: %w", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+
+	return stdout.String(), stderr.String(), err
+}
+
+// generatePythonXMLInPod generates a Cobertura XML report by executing Python inside the pod
+func (c *CoverageClient) generatePythonXMLInPod(ctx context.Context, podName, containerName, testDir string) error {
+	fmt.Printf("  📊 Generating Cobertura XML report in pod...\n")
+
+	// Python script that combines coverage files from /dev/shm and generates XML
+	pythonScript := `
+import sys, os, glob
+from coverage import CoverageData, Coverage
+
+data_dir = os.environ.get('COVERAGE_DATA_DIR', '/dev/shm')
+pattern = os.path.join(data_dir, '.coverage*')
+files = sorted(glob.glob(pattern))
+
+if not files:
+    print('NO_COVERAGE_FILES', file=sys.stderr)
+    sys.exit(1)
+
+combined = CoverageData(no_disk=True)
+for f in files:
+    try:
+        d = CoverageData(basename=f)
+        d.read()
+        combined.update(d)
+    except Exception:
+        pass
+
+combined_db = os.path.join(data_dir, '.coverage_xml_temp')
+out = CoverageData(basename=combined_db)
+for mf in combined.measured_files():
+    lines = combined.lines(mf)
+    if lines:
+        out.add_lines({mf: lines})
+    arcs = combined.arcs(mf)
+    if arcs:
+        out.add_arcs({mf: arcs})
+out.write()
+
+cov = Coverage(data_file=combined_db)
+cov.load()
+xml_path = os.path.join(data_dir, 'coverage.xml')
+cov.xml_report(outfile=xml_path)
+
+try:
+    os.remove(combined_db)
+except Exception:
+    pass
+
+print('XML_GENERATED:' + xml_path)
+`
+
+	// Step 1: Generate XML inside the pod
+	cmd := []string{"python", "-c", pythonScript}
+	stdout, stderr, err := c.execInPod(ctx, podName, containerName, cmd)
+	if err != nil {
+		return fmt.Errorf("generate XML: %w (stderr: %s)", err, stderr)
+	}
+
+	// Check if XML was generated
+	if !strings.Contains(stdout, "XML_GENERATED:") {
+		return fmt.Errorf("XML generation failed: stdout=%s stderr=%s", stdout, stderr)
+	}
+
+	// Step 2: Read the XML content from the pod
+	catCmd := []string{"cat", "/dev/shm/coverage.xml"}
+	xmlContent, catStderr, err := c.execInPod(ctx, podName, containerName, catCmd)
+	if err != nil {
+		return fmt.Errorf("read XML: %w (stderr: %s)", err, catStderr)
+	}
+
+	if len(xmlContent) == 0 {
+		return fmt.Errorf("empty XML content")
+	}
+
+	// Step 3: Save XML locally
+	xmlPath := filepath.Join(testDir, "coverage.xml")
+	if err := os.WriteFile(xmlPath, []byte(xmlContent), 0644); err != nil {
+		return fmt.Errorf("write XML: %w", err)
+	}
+
+	fmt.Printf("  ✅ Cobertura XML saved: %s (%d bytes)\n", xmlPath, len(xmlContent))
+
+	// Step 4: Cleanup temp file in pod
+	cleanupCmd := []string{"python", "-c", "import os; os.remove('/dev/shm/coverage.xml')"}
+	c.execInPod(ctx, podName, containerName, cleanupCmd) //nolint: ignore cleanup errors
+
 	return nil
 }
 
@@ -540,7 +762,7 @@ func (c *CoverageClient) collectPythonCoverage(body []byte, testName string) err
 		return fmt.Errorf("create test directory: %w", err)
 	}
 
-	// Save as .coverage file (Python's native format)
+	// Save raw coverage data (serialized format from coverage.py)
 	coverageFile := filepath.Join(testDir, ".coverage")
 	if err := os.WriteFile(coverageFile, coverageData, 0644); err != nil {
 		return fmt.Errorf("write coverage file: %w", err)

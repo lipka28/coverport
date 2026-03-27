@@ -247,11 +247,25 @@ func (p *CoverageProcessor) processPythonCoverage(ctx context.Context, opts Proc
 		return fmt.Errorf("failed to get absolute path for output file: %w", err)
 	}
 
+	// Create a temporary .coveragerc with path mappings for container -> local path remapping
+	// This allows coverage.py to find source files when they're at different paths
+	rcFile, err := p.createPythonCoverageRC(opts.RepoRoot)
+	if err != nil {
+		fmt.Printf("   ⚠️  Could not create coverage config: %v\n", err)
+	} else if rcFile != "" {
+		defer os.Remove(rcFile)
+		fmt.Printf("   📍 Created path mapping config: %s\n", rcFile)
+	}
+
 	// Generate XML report using Python's coverage tool
 	fmt.Println("   Converting coverage to XML format...")
-	cmd := exec.CommandContext(ctx, pythonPath, "-m", "coverage", "xml",
-		"--data-file="+absCoverageFile,
-		"-o", absOutputFile)
+	args := []string{"-m", "coverage", "xml",
+		"--data-file=" + absCoverageFile,
+		"-o", absOutputFile}
+	if rcFile != "" {
+		args = append(args, "--rcfile="+rcFile)
+	}
+	cmd := exec.CommandContext(ctx, pythonPath, args...)
 
 	// Run from repo root for proper path resolution
 	if opts.RepoRoot != "" {
@@ -272,8 +286,12 @@ func (p *CoverageProcessor) processPythonCoverage(ctx context.Context, opts Proc
 
 	// Optionally generate text report for summary
 	textReportFile := strings.TrimSuffix(opts.OutputFile, filepath.Ext(opts.OutputFile)) + ".txt"
-	textCmd := exec.CommandContext(ctx, pythonPath, "-m", "coverage", "report",
-		"--data-file="+absCoverageFile)
+	textArgs := []string{"-m", "coverage", "report",
+		"--data-file=" + absCoverageFile}
+	if rcFile != "" {
+		textArgs = append(textArgs, "--rcfile="+rcFile)
+	}
+	textCmd := exec.CommandContext(ctx, pythonPath, textArgs...)
 
 	if opts.RepoRoot != "" {
 		textCmd.Dir = opts.RepoRoot
@@ -301,7 +319,7 @@ func (p *CoverageProcessor) processPythonCoverage(ctx context.Context, opts Proc
 
 	// Generate HTML report if requested
 	if opts.GenerateHTML {
-		if err := p.generatePythonHTMLReport(ctx, pythonPath, absCoverageFile, opts.RepoRoot, opts.InputDir); err != nil {
+		if err := p.generatePythonHTMLReport(ctx, pythonPath, absCoverageFile, opts.RepoRoot, opts.InputDir, rcFile); err != nil {
 			fmt.Printf("⚠️  Failed to generate HTML report: %v\n", err)
 		}
 	}
@@ -310,15 +328,61 @@ func (p *CoverageProcessor) processPythonCoverage(ctx context.Context, opts Proc
 	return nil
 }
 
+// createPythonCoverageRC creates a temporary .coveragerc file with path mappings
+// This maps common container paths (like /app/) to the local repository root
+func (p *CoverageProcessor) createPythonCoverageRC(repoRoot string) (string, error) {
+	if repoRoot == "" {
+		// Try to use current working directory
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", nil
+		}
+		repoRoot = cwd
+	}
+
+	// Common container source paths that need to be remapped
+	containerPaths := []string{"/app/", "/src/", "/code/", "/workspace/"}
+
+	// Create the [paths] section for coverage.py
+	// Format: source = <local_path>\n          <container_path1>\n          <container_path2>...
+	rcContent := fmt.Sprintf(`[paths]
+source =
+    %s
+    /app/
+    /src/
+    /code/
+    /workspace/
+`, repoRoot)
+
+	// Write to temp file
+	tmpFile, err := os.CreateTemp("", "coveragerc-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp file: %w", err)
+	}
+	defer tmpFile.Close()
+
+	if _, err := tmpFile.WriteString(rcContent); err != nil {
+		os.Remove(tmpFile.Name())
+		return "", fmt.Errorf("write rc content: %w", err)
+	}
+
+	_ = containerPaths // silence unused warning
+	return tmpFile.Name(), nil
+}
+
 // generatePythonHTMLReport generates an HTML coverage report for Python
-func (p *CoverageProcessor) generatePythonHTMLReport(ctx context.Context, pythonPath, coverageFile, repoRoot, outputDir string) error {
+func (p *CoverageProcessor) generatePythonHTMLReport(ctx context.Context, pythonPath, coverageFile, repoRoot, outputDir, rcFile string) error {
 	fmt.Println("   📊 Generating HTML coverage report...")
 
 	htmlDir := filepath.Join(outputDir, "htmlcov")
 
-	cmd := exec.CommandContext(ctx, pythonPath, "-m", "coverage", "html",
-		"--data-file="+coverageFile,
-		"-d", htmlDir)
+	args := []string{"-m", "coverage", "html",
+		"--data-file=" + coverageFile,
+		"-d", htmlDir}
+	if rcFile != "" {
+		args = append(args, "--rcfile="+rcFile)
+	}
+	cmd := exec.CommandContext(ctx, pythonPath, args...)
 
 	if repoRoot != "" {
 		cmd.Dir = repoRoot
