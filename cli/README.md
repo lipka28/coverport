@@ -14,7 +14,7 @@
 - **🔧 Flexible Discovery**: Support for label selectors, image refs, and explicit pod names
 - **🔐 Git Metadata Extraction**: Extract repository information from container images using cosign
 - **📤 Codecov Integration**: Direct upload to Codecov with proper commit mapping
-- **🌍 Multi-Language Support**: Go (current), Python, and Node.js (NYC) - coming soon
+- **🌍 Multi-Language Support**: Go and Python supported, Node.js (NYC) coming soon
 
 ## Recent Improvements
 
@@ -392,18 +392,29 @@ coverport collect \
 
 For each discovered pod:
 1. **Port-forward**: Establishes port-forward to the coverage server (default: 9095)
-2. **HTTP request**: Sends POST request to `/coverage` endpoint
-3. **Download**: Retrieves binary coverage data (covmeta + covcounters)
-4. **Metadata**: Collects pod/container information
-5. **Save**: Organizes files by component
+2. **Health check**: Checks `/health` to auto-detect language (Go vs Python)
+3. **HTTP request**: Sends request to `/coverage` endpoint
+4. **Download**: Retrieves coverage data
+5. **Metadata**: Collects pod/container information
+6. **Save**: Organizes files by component
+
+**Go-specific flow:**
+- POST `/coverage` → retrieves binary coverage data (covmeta + covcounters)
+
+**Python-specific flow:**
+- Triggers coverage save via `/coverage/save` (sends SIGHUP to Gunicorn workers)
+- GET `/coverage` → retrieves base64-encoded coverage data
+- Exec into pod: runs `coverage xml` to generate Cobertura XML using Python inside the pod
 
 ### 3. Report Processing
 
-When `--auto-process` is enabled (default):
+**Go** (when `--auto-process` is enabled, default):
 1. **Generate**: Converts binary coverage to text format (`coverage.out`)
 2. **Remap**: Remaps container paths to local paths
 3. **Filter**: Removes unwanted files (e.g., coverage_server.go)
 4. **HTML**: Generates HTML visualization
+
+**Python**: Report processing happens automatically during `collect` — Cobertura XML is generated inside the pod where Python and the `coverage` package are already available. No separate `process` step is needed.
 
 ### 4. OCI Artifact Push
 
@@ -423,39 +434,58 @@ When `--push` is enabled:
 
 ### Coverage Server Requirements
 
-The application being tested must:
-1. Be built with coverage instrumentation: `go build -cover`
+#### Go Applications
+
+1. Build with coverage instrumentation: `go build -cover`
 2. Set `GOCOVERDIR` environment variable
-3. Run the coverage HTTP server (port 9095 by default)
+3. Run the [go-coverage-http](https://github.com/psturc/go-coverage-http) server (port 9095 by default)
 4. Expose the coverage port in the container
 
-Example Deployment:
+```yaml
+containers:
+- name: app
+  image: quay.io/user/myapp:latest
+  env:
+  - name: GOCOVERDIR
+    value: /tmp/coverage
+  - name: COVERAGE_SERVER_PORT
+    value: "9095"
+  ports:
+  - containerPort: 8080
+  - containerPort: 9095
+```
+
+#### Python Applications
+
+1. Add coverage instrumentation files from [py-coverage-http](https://github.com/psturc/py-coverage-http)
+2. Build a test Docker image with the coverage wrapper
+3. Coverage server runs automatically on port 9095
 
 ```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: myapp
-spec:
-  template:
-    spec:
-      containers:
-      - name: app
-        image: quay.io/user/myapp:latest
-        env:
-        - name: GOCOVERDIR
-          value: /tmp/coverage
-        - name: COVERAGE_SERVER_PORT
-          value: "9095"
-        ports:
-        - name: http
-          containerPort: 8080
-        - name: coverage
-          containerPort: 9095
+containers:
+- name: app
+  image: quay.io/user/myapp:test
+  env:
+  - name: COVERAGE_PROCESS_START
+    value: /app/.coveragerc
+  - name: COVERAGE_PORT
+    value: "9095"
+  - name: COVERAGE_DATA_DIR
+    value: /dev/shm
+  - name: TMPDIR
+    value: /dev/shm
+  ports:
+  - containerPort: 8080
+  - containerPort: 9095
+  securityContext:
+    readOnlyRootFilesystem: true
 ```
+
+See [py-coverage-http](https://github.com/psturc/py-coverage-http) for full instrumentation setup.
 
 ## Output Structure
 
+**Go applications:**
 ```
 coverage-output/
 ├── component-1/
@@ -467,12 +497,15 @@ coverage-output/
 │       ├── coverage.html               # HTML visualization
 │       ├── metadata.json               # Pod/container metadata
 │       └── component-metadata.json     # Component-specific metadata
-├── component-2/
-│   └── coverage-e2e-tests-component-2/
-│       └── ...
-└── component-3/
-    └── coverage-e2e-tests-component-3/
-        └── ...
+```
+
+**Python applications:**
+```
+coverage-output/
+├── <test-name>/
+│   ├── .coverage                       # Raw coverage data
+│   ├── coverage.xml                    # Cobertura XML (for Codecov)
+│   └── metadata.json                   # Pod/container metadata
 ```
 
 ## Troubleshooting
@@ -496,7 +529,8 @@ coverage-output/
 - Verify coverage server is running in the pod
 - Check port is correct (default: 9095)
 - Ensure pod has coverage instrumentation
-- Verify `GOCOVERDIR` is set in the container
+- **Go**: Verify `GOCOVERDIR` is set in the container
+- **Python**: Verify `COVERAGE_PROCESS_START` is set and `sitecustomize.py` is installed
 - Check network policies allow port-forwarding
 
 ### Path remapping issues
@@ -568,8 +602,8 @@ See LICENSE file in the repository root.
 
 ## Related Tools
 
-- **go-coverage-http/server**: Coverage HTTP server for instrumented applications
-- **go-coverage-http/client**: Go library for coverage collection
+- **[go-coverage-http](https://github.com/psturc/go-coverage-http)**: Coverage HTTP server for Go applications
+- **[py-coverage-http](https://github.com/psturc/py-coverage-http)**: Coverage HTTP server for Python applications (Flask, Django, Gunicorn)
 
 ## Support
 

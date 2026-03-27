@@ -6,10 +6,9 @@ Get started with `coverport` in 5 minutes!
 
 ## Prerequisites
 
-1. **Instrumented Go Application**: Your app must be built with coverage:
-   ```bash
-   go build -cover -o app
-   ```
+1. **Instrumented Application**: Your app must have coverage instrumentation:
+   - **Go**: Build with `go build -cover -o app` and run [go-coverage-http](https://github.com/psturc/go-coverage-http) server
+   - **Python**: Add instrumentation files from [py-coverage-http](https://github.com/psturc/py-coverage-http) and build a test Docker image
 
 2. **Coverage Server Running**: Your app must run the coverage HTTP server (port 9095)
 
@@ -124,16 +123,23 @@ Coverage Port: 9095
 
 ## Step 4: View Coverage Report
 
-### Text Report
+### Go
 
 ```bash
+# Text report
 cat ./coverage-output/myapp/my-test-myapp/coverage_filtered.out
+
+# HTML report
+open ./coverage-output/myapp/my-test-myapp/coverage.html
 ```
 
-### HTML Report
+### Python
+
+For Python, `coverport collect` generates Cobertura XML automatically:
 
 ```bash
-open ./coverage-output/myapp/my-test-myapp/coverage.html
+# XML report (ready for Codecov upload)
+cat ./coverage-output/my-test/coverage.xml
 ```
 
 ## Step 5: Push to OCI Registry (Optional)
@@ -232,10 +238,10 @@ coverage-output/
 1. Verify coverage server is running in the pod:
    ```bash
    kubectl port-forward pod/myapp-pod-1 9095:9095
-   curl http://localhost:9095/coverage
+   curl http://localhost:9095/health
    ```
-2. Check `GOCOVERDIR` is set in container
-3. Verify app was built with `-cover` flag
+2. **Go**: Check `GOCOVERDIR` is set and app was built with `-cover` flag
+3. **Python**: Check `COVERAGE_PROCESS_START` is set and `sitecustomize.py` is installed in site-packages
 
 ### Permission Denied
 

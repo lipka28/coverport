@@ -2,7 +2,7 @@
 
 ## Overview
 
-`coverport` is a command-line interface built on top of the `go-coverage-http/client` library, designed specifically for Konflux/Tekton integration pipelines and CI/CD automation.
+`coverport` is a command-line interface for collecting code coverage from Go and Python applications running in Kubernetes, designed specifically for Konflux/Tekton integration pipelines and CI/CD automation.
 
 ## Recent Changes
 
@@ -59,6 +59,21 @@
 │  • k8s.io/client-go  • oras-go  • go tool covdata          │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+### Language-Specific Collection Flows
+
+**Go applications:**
+1. POST `/coverage` → binary coverage data (covmeta + covcounters)
+2. `go tool covdata` converts to text/HTML reports locally
+
+**Python applications:**
+1. GET `/health` → auto-detects Python coverage server
+2. POST `/coverage/save` → triggers SIGHUP to Gunicorn (workers save coverage to `/dev/shm`)
+3. GET `/coverage` → base64-encoded combined coverage data
+4. `kubectl exec` runs `coverage xml` inside the pod to generate Cobertura XML
+5. XML is fetched from the pod and saved locally
+
+The Python flow generates XML inside the target pod because the CoverPort CLI container does not include Python. This is by design — it avoids adding Python dependencies to the CLI image while leveraging the Python runtime already present in the instrumented pod.
 
 ## Components
 
@@ -437,6 +452,8 @@ See main project CONTRIBUTING.md for guidelines.
 
 - Main library: `../client/client.go`
 - Example test: `../test/e2e_test.go`
+- [go-coverage-http](https://github.com/psturc/go-coverage-http) - Go coverage HTTP server
+- [py-coverage-http](https://github.com/psturc/py-coverage-http) - Python coverage HTTP server
 - Cobra documentation: https://cobra.dev/
 - Kubernetes client-go: https://github.com/kubernetes/client-go
 

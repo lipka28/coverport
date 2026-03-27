@@ -2,7 +2,7 @@
 
 ## What Was Created
 
-A complete, production-ready CLI tool for collecting Go coverage data from Kubernetes pods in CI/CD pipelines, specifically designed for Konflux/Tekton integration.
+A complete, production-ready CLI tool for collecting Go and Python coverage data from Kubernetes pods in CI/CD pipelines, specifically designed for Konflux/Tekton integration.
 
 ## Project Structure
 
@@ -54,11 +54,8 @@ coverport-cli/
 - Clear separation of coverage data
 
 ### 3. **Automatic Processing**
-- Binary coverage collection (covmeta + covcounters)
-- Text report generation (coverage.out)
-- Path remapping (container → local paths)
-- Coverage filtering (remove test/server files)
-- HTML report generation
+- **Go**: Binary coverage collection (covmeta + covcounters), text report generation, path remapping, filtering, HTML generation
+- **Python**: Auto-detects Python coverage server, triggers coverage save, generates Cobertura XML inside the pod via `kubectl exec`
 
 ### 4. **OCI Registry Integration**
 - Push coverage artifacts to any OCI registry (Quay, Docker Hub, etc.)
@@ -154,6 +151,7 @@ The discovery algorithm:
 
 ## Output Structure
 
+**Go:**
 ```
 coverage-output/
 ├── component-1/
@@ -165,9 +163,15 @@ coverage-output/
 │       ├── coverage.html               # HTML visualization
 │       ├── metadata.json               # Pod metadata
 │       └── component-metadata.json     # Component info
-└── component-2/
-    └── test-name-component-2/
-        └── ...
+```
+
+**Python:**
+```
+coverage-output/
+├── <test-name>/
+│   ├── .coverage                       # Raw coverage data
+│   ├── coverage.xml                    # Cobertura XML (for Codecov)
+│   └── metadata.json                   # Pod metadata
 ```
 
 ## Integration Points
